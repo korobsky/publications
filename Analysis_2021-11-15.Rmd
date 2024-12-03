@@ -1,0 +1,513 @@
+---
+title: "Ring-based CI"
+author: "Katherine Robsky"
+date: "11/15/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Rationale: 
+Household contact investigation is a high yield approach to active case finding for TB. In urban, densely populated areas, there is likely transmission not only in the household but also in the nearby vicinity. We aimed to investigate the potential yield of active case finding conducted within a defined geographic radius (100m) of an index case, using cases identified via household based case finding to represent "undiagnosed" TB cases.   
+
+# Study population:   
+-Index cases: All patients who lived within the study area who were diagnosed with TB and enrolled via the health facilities at any time during the study    
+-Community cases: All individuals who participated in household-based screening (and who lived within the study area) who had positive (including trace) xpert results    
+
+
+# Methods:   
+-Plotted residential location of index patients & community cases (gps coordinates)   
+-calculated a 100m buffer around each index case   
+-Identified which community cases fell within any of these buffers (could be more than one)   
+-Compared sociodemographic characteristics of cases that were within the buffer (i.e. would be found by this method of screening) vs outside the buffer   
+-sensitivity analysis varying buffer radius   
+-(to do) estimate a number needed to screen for each radius   
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(gtsummary) # for tables
+library(tidyverse)
+library(ggplot2)
+library(ggmap)
+library(sf)
+library(table1) 
+library(DiagrammeR)
+
+```
+
+
+```{r CC_data, echo=FALSE}
+# index cases: facility diagnosed cases from study area
+cc_data<-read.csv("STOMPTBMainCasesCont_DATA_2021-09-20_1454.csv")
+
+#keep only facility cases
+   hf_cases <- cc_data %>% 
+    filter (redcap_event_name=="tb_case_enrollment_arm_1" | redcap_event_name=="tb_case_enrollment_arm_3")  %>% 
+    filter (participant_parish %in% 1:3) %>% 
+    mutate(
+    hf = case_when (
+      redcap_event_name=="tb_case_enrollment_arm_1"  ~ 1,
+      redcap_event_name=="tb_case_enrollment_arm_3" & com_screening_method_case==1 ~ 1,
+      redcap_event_name=="tb_case_enrollment_arm_3" & com_screening_method_case>1 ~ 0))  %>% 
+    filter (hf ==1) 
+   
+        # table(hf_cases$redcap_event_name)  
+        # table(hf_cases$participant_parish)
+        # table(hf_cases$hf)
+
+```
+
+
+
+
+
+```{r HH1_data, echo=FALSE}
+hh1<-read.csv('1stSTOMPTBCommunityW_DATA_2021-09-20_1502.csv')
+
+hh1_clean<-hh1%>%
+    filter(redcap_event_name !="individual_info_arm_2") %>%
+    filter(record_id>4)  %>% 
+    mutate(householdID=case_when(
+       redcap_event_name =="household_info_arm_1" ~ hhid , 
+       redcap_event_name !="household_info_arm_1" ~ record_id ))
+  
+#table(hh1_clean$redcap_event_name)
+#sum(is.na(hh1_clean$householdID))
+
+#select smaller datasets
+hh1_hh_info<-hh1_clean %>% 
+  filter(redcap_event_name=="household_info_arm_1")  %>% 
+  dplyr::select(record_id, householdID, redcap_event_name, hhid:hh_village_other)
+  
+hh1_ind_info<-hh1_clean %>% 
+  filter(redcap_event_name !="household_info_arm_1")%>% 
+  dplyr::select(householdID, record_id, redcap_event_name, recordidcalc:res_cmmt)
+
+#only positive xperts
+#0, MTB negative | 1, MTB Postive | 8, Invalid or indeterminate | 7, Result missing or unavailable | 9, Not categorized by current automated script
+  #table(hh1_ind_info$xpertscreen_category)
+  
+  
+  hh1_cases<-hh1_ind_info %>% filter (xpertscreen_category %in% 1:2)
+ # table(hh1_cases$xpertscreen_category)
+
+  
+  
+```
+
+
+```{r HH2_data, echo=FALSE}
+
+hh2<-read.csv('2ndSTOMPTBCommunityW_DATA_2021-09-20_1453.csv') 
+#table(hh2$redcap_event_name)
+hh2_clean<-hh2 %>%
+    filter(redcap_event_name !="individual_info_arm_2") %>%
+    filter(redcap_event_name !="costing_dtd_inside_arm_3") %>%
+    filter(redcap_event_name !="costing_dtd_outsid_arm_3") %>%
+    filter(redcap_event_name !="costing_vbs_arm_4")  %>% 
+   mutate(record_id=as.integer(record_id))  %>% 
+   mutate(householdID=case_when(
+       redcap_event_name =="household_info_arm_1" ~ hhid , 
+       redcap_event_name !="household_info_arm_1" ~ record_id ))
+
+  
+#select smaller datasets
+hh2_hh_info<-hh2_clean %>% 
+  filter(redcap_event_name=="household_info_arm_1")  %>% 
+  dplyr::select(householdID, record_id, redcap_event_name, hhid:hh_village_other)
+  
+hh2_ind_info<-hh2_clean %>% 
+  filter(redcap_event_name !="household_info_arm_1")%>% 
+  dplyr::select(householdID,  record_id, redcap_event_name, recordidcalc:res_cmmt)
+
+          #class(hh2_clean$hhid)
+          #class(hh2_clean$record_id)
+          #class(hh2_clean$record_id2)
+          
+          #class(hh1$hhid)
+          #class(hh1$record_id)
+
+#sum(is.na(hh2_ind_info$householdID))
+
+  #only positive xperts
+  #0, MTB negative | 1, MTB Postive | 2, MTB Trace | 8, Invalid or indeterminate | 7, Result missing or unavailable | 9, Not categorized by current automated script
+  #table(hh2_ind_info$xpertscreen_category)
+  hh2_cases<-hh2_ind_info %>% filter (xpertscreen_category %in% 1:2)
+  #table(hh2_cases$xpertscreen_category)
+
+```
+
+
+```{r coords, echo=FALSE}
+#index cases
+#sum(is.na(hf_cases$gps_latitude))
+#sum(is.na(hf_cases$gps_longitude))
+
+hf_cases_gps<-hf_cases %>%
+  dplyr::select(gps_latitude, gps_longitude)%>%
+  filter(!is.na(gps_latitude))%>%
+  filter(!is.na(gps_longitude))
+
+#merge in gps data for each phase separately
+gps1<-read.csv('GPS_Collection_for_All_Records_2August2019_results.csv')
+gps1<-gps1 %>%
+    distinct(householdID, .keep_all = TRUE) 
+hh1_gps<-left_join(hh1_cases, gps1, by="householdID")
+
+hh1_gps_pts<-hh1_gps %>%
+  dplyr::select(householdID, screening_id, Location.Latitude, Location.Longitude)
+#head(hh1_gps)
+
+
+gps2<-read.csv('Community_Phase_II_GPS_Collection_results_09AUgust2021.csv')
+gps2<-gps2 %>%
+    distinct(householdID, .keep_all = TRUE)
+hh2_gps<-left_join(hh2_cases, gps2, by="householdID")
+
+
+hh2_gps_pts<-hh2_gps %>%
+  dplyr::select(householdID, screening_id, Location.Latitude, Location.Longitude)
+
+```
+
+```{r, echo=FALSE}
+
+hh1_gps_pts$phase<-1
+hh2_gps_pts$phase<-2
+
+all_comm_pts <- rbind(hh1_gps_pts, hh2_gps_pts)
+all_comm_pts_gps<-all_comm_pts%>%
+  filter(!is.na(Location.Latitude))%>%
+  filter(!is.na(Location.Longitude))
+
+
+#numbers included in study
+
+#HF cases (index cases)
+#count(hf_cases)
+#count(hf_cases_gps)
+
+
+#Community cases
+# count(hh1_cases)
+# count(hh2_cases)
+# count(all_comm_pts_gps) # all COM cases with GPS data
+
+all_com_gps_ids<-c(all_comm_pts_gps$screening_id)
+
+```
+
+
+## Figure 1a. Index Cases
+```{r, echo=FALSE}
+DiagrammeR::grViz("digraph {
+  
+graph[layout = dot]
+
+a [label = 'HF Cases \n 171']
+b [label = 'Index cases for analysis \n 169']
+c [label = 'missing GPS \n 2']
+
+a -> b 
+a -> c
+
+}")
+
+```
+
+## Figure 1b. Community cases
+```{r, echo=FALSE}
+DiagrammeR::grViz("digraph {
+  
+graph[layout = dot]
+
+a [label = 'Com Cases Phase 1 \n 60']
+b [label = 'Com Cases Phase 2 \n 32']
+c [label = 'Total Com cases \n 92']
+d [label = 'missing GPS \n 40']
+e [label = 'Com cases for analysis \n 52']
+f [label = 'Within 100m of index case \n 30']
+f1 [label = 'Within 50m of index case \n 15']
+g [label = 'Not within 100m \n 22']
+h [label = 'Enrolled \n 10']
+i [label = 'Enrolled \n 18']
+
+a -> c 
+b -> c
+
+c -> d 
+c -> e
+
+e->g
+e->f
+
+f->h
+f->f1
+g->i
+
+
+}")
+
+
+```
+
+
+
+## Figure 2. Map
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#Mapping
+
+#get basemap
+# register_google(key = "AIzaSyBQwvvPDe8J38SS9Ig2EA-E9kDyQugDVN0")
+# bw_map <- get_googlemap(center = c(32.6, .31), zoom = 15,
+#   color = "bw")
+# ggmap(bw_map)
+
+#study area
+ studyboundary <- st_read("StudyAreaNew.shp")
+ st_crs(studyboundary)
+
+
+#Create spatial files
+hf_cases_gps_sf <- st_as_sf(hf_cases_gps, coords = c("gps_longitude", "gps_latitude"), crs = 4326)
+all_comm_pts_sf <- st_as_sf(all_comm_pts_gps, coords = c("Location.Longitude", "Location.Latitude"), crs = 4326)
+
+#make sure same coordinate system
+st_crs(hf_cases_gps_sf) = st_crs(all_comm_pts_sf)
+ 
+
+
+#create buffer around hf cases
+hf_cases_gps_sf_m = st_transform(hf_cases_gps_sf, "+proj=utm +zone=42N +datum=WGS84 +units=m")
+all_comm_pts_sf_m = st_transform(all_comm_pts_sf, "+proj=utm +zone=42N +datum=WGS84 +units=m")
+
+hf_cases_buffer100m = st_buffer(hf_cases_gps_sf_m, 100)
+ring_com_cases100m = st_intersection(hf_cases_buffer100m, all_comm_pts_sf_m)
+
+#50m buffer
+hf_cases_buffer50m = st_buffer(hf_cases_gps_sf_m, 50)
+ring_com_cases50m = st_intersection(hf_cases_buffer50m, all_comm_pts_sf_m)
+
+
+ggplot() + 
+  geom_sf(data = studyboundary, size = .5, color = "black", alpha=0) +
+  geom_sf(data = hf_cases_gps_sf,  color = "red") +
+  geom_sf(data = all_comm_pts_sf,  color = "blue") +
+  geom_sf(data=hf_cases_buffer100m, alpha=0, color="darkgray")
+
+
+
+ 
+```
+```{r, echo=FALSE}
+# Look at differences between those who would be found via ring based CI and those who wouldn't
+#class(ring_com_cases100m)
+
+ring_com_cases2 <- ring_com_cases100m %>% st_drop_geometry()
+#class(ring_com_cases2)
+ring_com_cases3 <-ring_com_cases2 %>% distinct()
+#table(ring_com_cases3$phase)
+ring_ids<-c(ring_com_cases3$screening_id)
+
+  #50m
+  ring_com_cases2_50 <- ring_com_cases50m %>% st_drop_geometry()
+  ring_com_cases3_50 <-ring_com_cases2_50 %>% distinct()
+  #table(ring_com_cases3_50$phase)
+
+  
+ring_cases<-filter(cc_data, com_screeningid %in% ring_ids)
+ring_cases$ring100m<-1
+
+
+outside_ring_cases<-filter(cc_data, com_screeningid %in% all_com_gps_ids)
+outside_ring_cases<-filter(outside_ring_cases, !com_screeningid %in% ring_ids)
+outside_ring_cases$ring100m<-0
+
+
+analysis <- rbind(ring_cases, outside_ring_cases)
+#count(analysis)
+
+
+
+```
+## Table 1
+```{r, echo=FALSE}
+#variables for table1
+analysis$ring100m     <- factor(analysis$ring100m, levels=0:1, labels=c("Missed", "Identified (100m ring)"))
+#table(analysis$ring100m)
+
+analysis1<- analysis %>% 
+  rename(
+         No_medical_condition = medical_conditions___1,
+         copd = medical_conditions___2,
+         hbp = medical_conditions___4,
+         pregnant = medical_conditions___9,
+         cough = symptoms_past_week___1,
+         coughblood=symptoms_past_week___2,
+         fever=  symptoms_past_week___3,
+         fatigue= symptoms_past_week___4,
+         nightsweats=  symptoms_past_week___5,
+         shortbreath= symptoms_past_week___6,
+        chestpain=symptoms_past_week___7,
+        no_symptoms=  symptoms_past_week___8,
+        appetiteloss=  symptoms_past_week___11
+        ) %>% 
+  mutate(
+         parish = if_else(participant_parish==1, "Kisugu",
+              if_else(participant_parish==2, "Wabigalo",
+              if_else(participant_parish==3, "Bukasa", "NA"))),
+         sex=if_else(com_female_screening==0, "Male",
+              if_else(com_female_screening==1, "Female", "NA")),
+         employed = if_else(occupation==1 | occupation==3 |occupation==4, "Employed",
+             ifelse(occupation==2 | occupation==8 |occupation==5 | occupation==6, "Unemployed", "NA")),
+         readwrite = ifelse(can_read_and_write == 1, "Yes",
+                       ifelse(can_read_and_write %in% 2:5, "No", "NA")),
+         skip_any_meal = ifelse(meals_skipped == 1, "No",
+                       ifelse(meals_skipped %in% 2:3, "Yes", "NA")),
+         hiv = if_else(medical_conditions___5==1 | why_no_hiv_test_study==2 | hiv_test_result==1 | hivtest_result_study==1 | pretbhiv==1 | labhiv==1 | txreghiv==1 | newtest_hiv==1 ,  "Yes" ,  "No")
+         )
+
+table1(~  parish + com_ageyears_screening + sex + hiv + employed + readwrite +skip_any_meal| ring100m, data=analysis1)
+
+
+```
+
+
+```{r, echo=FALSE}
+# 
+# 
+# #income
+# max(cases$income_regular_emplyment, na.rm=TRUE)
+# max(cases$income_casual_work, na.rm=TRUE)
+# max(cases$income_grant_pensions, na.rm=TRUE)
+# max(cases$income_other_sources, na.rm=TRUE)
+# min(cases$income_regular_emplyment, na.rm=TRUE)
+# min(cases$income_casual_work, na.rm=TRUE)
+# min(cases$income_grant_pensions, na.rm=TRUE)
+# min(cases$income_other_sources, na.rm=TRUE)
+# 
+# cases <- cases %>% 
+#    mutate(income_regular_emplyment = ifelse(income_regular_emplyment >= 0, income_regular_emplyment, NA))
+# cases <- cases %>% 
+#    mutate(income_casual_work = ifelse(income_casual_work >= 0, income_casual_work, NA))
+# cases <- cases %>% 
+#    mutate(income_grant_pensions = ifelse(income_grant_pensions >= 0, income_grant_pensions, NA))
+# cases <- cases %>% 
+#    mutate(income_other_sources = ifelse(income_other_sources >= 0, income_other_sources, NA))
+#           
+# cases$total_income<-cases$income_regular_emplyment + cases$income_casual_work + cases$income_grant_pensions + cases$income_other_sources
+# 
+# 
+# 
+# 
+# 
+# ##symptoms/clinical
+# #hiv
+# cases <- cases %>% 
+#    mutate(
+#      hiv = if_else(medical_conditions___5==1 | why_no_hiv_test_study==2 | hiv_test_result==1 | hivtest_result_study==1 | pretbhiv==1 | labhiv==1 | txreghiv==1 | newtest_hiv==1 ,  1 ,  0, missing=0))
+# 
+# #previous tb treatment
+# table(cases$treated_past)
+# cases <- cases %>% 
+#    mutate(prevtx = ifelse(treated_past == 0, 0,
+#                        ifelse(treated_past == 1, 1, NA)
+#                        ))
+# table(cases$prevtx)
+# 
+# #cough_weeks
+# max(cases$cough_weeks, na.rm = FALSE)
+# class(cases$cough_weeks)
+# cases$cough_weeks[is.na(cases$cough_weeks)] <- 0
+# 
+# #cough during interview
+# table(cases$coughs_in_5_min)
+# cases <- cases %>% 
+#    mutate(cough5min = ifelse(coughs_in_5_min ==0, 0,
+#                        ifelse(coughs_in_5_min %in% 1:20, 1, NA)
+#                        ))
+# table(cases$cough5min)
+# 
+# table(cases$coughs_in_interview)
+# cases <- cases %>% 
+#    mutate(cough_freq = ifelse(coughs_in_interview %in% 1:3, 0,
+#                        ifelse(coughs_in_interview %in% 4:5, 1, NA)
+#                        ))
+# table(cases$cough_freq)
+# 
+# 
+# #diabetes
+# cases <- cases %>% 
+#    mutate(diabetes = ifelse(hba1c_results %in% 0:47, 0,
+#                        ifelse(hba1c_results %in% 48:103, 1, NA)
+#                        ))
+# table(cases$diabetes)
+# sum(is.na(cases$diabetes))
+# 
+# #bmi
+# min(cases$weight_kg,  na.rm=TRUE)
+# max(cases$weight_kg, na.rm=TRUE)
+# min(cases$height_cm,  na.rm=TRUE)
+# max(cases$height_cm, na.rm=TRUE)
+# 
+# cases <- cases %>% 
+#    mutate(weight_kg = ifelse(weight_kg >0 , weight_kg, NA))
+# cases <- cases %>% 
+#    mutate(height_cm = ifelse(height_cm >0 , height_cm, NA)  )   
+# cases <- cases %>% 
+#    mutate(height_m = height_cm/100 ) 
+# cases <- cases %>% 
+#    mutate(bmi=weight_kg/(height_m*height_m))
+# 
+#           
+# # data.case <- data.case %>% 
+# #   mutate(Gender = ifelse(sex_female==1, "Female", "Male"))
+# # # convert to factor and set male as reference group
+# # data.case$Gender <- as.factor(data.case$Gender)
+# # data.case$Gender <- relevel(data.case$Gender, ref = "Male")
+# 
+# 
+# #risk factors
+# table(cases$ever_lived_w_tb_contact)
+# cases <- cases %>% 
+#    mutate(hhcontact = ifelse(ever_lived_w_tb_contact == 0, 0,
+#                        ifelse(ever_lived_w_tb_contact == 1, 1, NA)
+#                        ))
+# table(cases$hhcontact)
+# 
+# table(cases$known_any_tb_cases)
+# cases <- cases %>% 
+#    mutate(anycontact = ifelse(known_any_tb_cases == 0, 0,
+#                        ifelse(known_any_tb_cases == 1, 1, NA)
+#                        ))
+# table(cases$anycontact)
+# 
+# table(cases$smoke_tobacco)
+# 
+# table(cases$ever_worked_in_h_care)
+# cases <- cases %>% 
+#    mutate(healthcare = ifelse(ever_worked_in_h_care == 1, 1,
+#                        ifelse(ever_worked_in_h_care ==0, 0, NA)
+#                        ))
+# table(cases$healthcare)
+# 
+# table(cases$been_to_prison)
+# cases <- cases %>% 
+#    mutate(prison = ifelse(been_to_prison == 1, 1,
+#                        ifelse(been_to_prison ==0, 0, NA)
+#                        ))
+# table(cases$prison)
+# 
+# table(cases$six_or_more_alchl_past_yr)
+# cases <- cases %>% 
+#    mutate(bingedrink_monthly = ifelse(six_or_more_alchl_past_yr %in% 1:2, 0,
+#                        ifelse(six_or_more_alchl_past_yr %in% 3:6, 1, 0)
+#                                          ))
+# table(cases$bingedrink_monthly)
+```
+
